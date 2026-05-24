@@ -20,6 +20,11 @@ namespace Orleans.Runtime.Messaging
     /// (like TLS) and register via <c>SiloConnectionOptions</c> or <c>ClientConnectionOptions</c>.
     /// Use these helpers for structured frame I/O within your middleware.
     /// </para>
+    /// <para>
+    /// This helper is optional. Middleware authors who need custom protocols can read/write
+    /// directly from <c>context.Transport.Input</c> (PipeReader) and <c>context.Transport.Output</c>
+    /// (PipeWriter) without using this class.
+    /// </para>
     /// </summary>
     public static class ConnectionFrameHelper
     {
@@ -45,14 +50,14 @@ namespace Orleans.Runtime.Messaging
 
             var readResult = await input.ReadAsync(cancellationToken);
             var buffer = readResult.Buffer;
-            CheckCompletion(ref readResult);
+            CheckCompletionWithData(ref readResult, 4);
 
             while (buffer.Length < 4)
             {
                 input.AdvanceTo(buffer.Start, buffer.End);
                 readResult = await input.ReadAsync(cancellationToken);
                 buffer = readResult.Buffer;
-                CheckCompletion(ref readResult);
+                CheckCompletionWithData(ref readResult, 4);
             }
 
             var lengthBytes = new byte[4];
@@ -70,7 +75,7 @@ namespace Orleans.Runtime.Messaging
                 input.AdvanceTo(buffer.Start, buffer.End);
                 readResult = await input.ReadAsync(cancellationToken);
                 buffer = readResult.Buffer;
-                CheckCompletion(ref readResult);
+                CheckCompletionWithData(ref readResult, totalNeeded);
             }
 
             var frameSlice = buffer.Slice(4, frameLength);
@@ -213,9 +218,11 @@ namespace Orleans.Runtime.Messaging
             }
         }
 
-        private static void CheckCompletion(ref ReadResult result)
+        private static void CheckCompletionWithData(ref ReadResult result, long required)
         {
-            if (result.IsCanceled || result.IsCompleted)
+            if (result.IsCanceled)
+                throw new InvalidOperationException("Connection terminated during frame exchange.");
+            if (result.IsCompleted && result.Buffer.Length < required)
                 throw new InvalidOperationException("Connection terminated during frame exchange.");
         }
     }
