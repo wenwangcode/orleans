@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Connections;
@@ -11,15 +12,18 @@ namespace Orleans.Runtime.Messaging
     /// <summary>
     /// Client-side (outbound) silo authentication middleware.
     /// <para>
-    /// Protocol: Receives challenge from server → Creates token → Sends token → Reads result.
+    /// Gating is decided by the negotiated TLS ALPN protocol (see <see cref="SiloAuthProtocol"/>):
+    /// a token is written only when the auth protocol (<see cref="SiloAuthOptions.AuthApplicationProtocol"/>)
+    /// was negotiated, which can only happen when both silos advertise it. The token is written
+    /// fire-and-forget — this side does not wait for any acknowledgement from the server — so
+    /// there is no round-trip and therefore no deadlock window during connection establishment.
+    /// Enforcement happens entirely on the server; a rejected connection is observed here only
+    /// indirectly, as a dropped connection on subsequent messages.
     /// </para>
     /// </summary>
     internal sealed class SiloAuthClientMiddleware : IConnectionMiddleware
     {
-        private const byte FrameTypeChallenge = 1;
-        private const byte FrameTypeToken = 2;
-        private const byte FrameTypeSuccess = 3;
-        private const byte FrameTypeFailure = 4;
+        private const byte FrameTypeToken = 1;
 
         private readonly ISiloConnectionAuthenticator _authenticator;
         private readonly SiloAuthOptions _options;
@@ -37,53 +41,44 @@ namespace Orleans.Runtime.Messaging
 
         public async Task OnConnectionAsync(ConnectionContext context, ConnectionDelegate next)
         {
+            if (!SiloAuthProtocol.IsAuthNegotiated(context))
+            {
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug(
+                        "Silo auth client: auth protocol not negotiated for {RemoteEndPoint}, sending no token.",
+                        context.RemoteEndPoint);
+                }
+
+                await next(context);
+                return;
+            }
+
             using var cts = new CancellationTokenSource(_options.Timeout);
             var cancellationToken = cts.Token;
 
             try
             {
-                // Step 1: Read challenge from server
-                var (frameType, challenge) = await ConnectionFrameHelper.ReadFrameAsync(
-                    context, cancellationToken, _options.MaxTokenSize + ConnectionFrameHelper.FramePrefixSize);
+                // Pre-acquire the token before writing any frame bytes, so that a slow/async token
+                // provider cannot leave a partially-written frame on the wire.
+                var tokenBuffer = new ArrayBufferWriter<byte>();
+                await _authenticator.WriteTokenAsync(tokenBuffer, cancellationToken);
 
-                if (frameType != FrameTypeChallenge)
-                {
-                    _logger.LogWarning("Silo auth client: expected challenge frame (type {Expected}), got type {Actual} from {RemoteEndPoint}.",
-                        FrameTypeChallenge, frameType, context.RemoteEndPoint);
-                    throw new ConnectionAbortedException("Authentication failed: unexpected frame type from server.");
-                }
-
-                // Step 2: Create token incorporating the challenge
-                var token = await _authenticator.CreateTokenAsync(challenge, cancellationToken);
-
-                // Step 3: Send token to server
-                await ConnectionFrameHelper.WriteFrameAsync(context, FrameTypeToken, token, cancellationToken);
-
-                // Step 4: Read result from server
-                var (resultType, _) = await ConnectionFrameHelper.ReadFrameAsync(context, cancellationToken);
-
-                if (resultType == FrameTypeFailure)
-                {
-                    _logger.LogWarning("Silo auth client: server rejected authentication for {RemoteEndPoint}.", context.RemoteEndPoint);
-                    throw new ConnectionAbortedException("Authentication failed: server rejected token.");
-                }
-
-                if (resultType != FrameTypeSuccess)
-                {
-                    _logger.LogWarning("Silo auth client: unexpected result frame type {FrameType} from {RemoteEndPoint}.",
-                        resultType, context.RemoteEndPoint);
-                    throw new ConnectionAbortedException("Authentication failed: unexpected result from server.");
-                }
+                await ConnectionFrameHelper.WriteFrameAsync(
+                    context,
+                    FrameTypeToken,
+                    tokenBuffer.WrittenMemory.ToArray(),
+                    cancellationToken);
 
                 if (_logger.IsEnabled(LogLevel.Debug))
                 {
-                    _logger.LogDebug("Silo auth client: authenticated to {RemoteEndPoint}.", context.RemoteEndPoint);
+                    _logger.LogDebug("Silo auth client: token sent to {RemoteEndPoint}.", context.RemoteEndPoint);
                 }
             }
             catch (OperationCanceledException) when (cts.IsCancellationRequested)
             {
-                _logger.LogWarning("Silo auth client: handshake timed out to {RemoteEndPoint}.", context.RemoteEndPoint);
-                throw new ConnectionAbortedException("Authentication failed: handshake timed out.");
+                _logger.LogWarning("Silo auth client: token write timed out to {RemoteEndPoint}.", context.RemoteEndPoint);
+                throw new ConnectionAbortedException("Authentication failed: token write timed out.");
             }
 
             await next(context);

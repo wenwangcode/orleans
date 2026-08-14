@@ -14,6 +14,7 @@ namespace Orleans.Connections.Security
         {
             ApplicationProtocols = new List<SslApplicationProtocol>
             {
+                OrleansApplicationProtocol.SiloAuth1,
                 OrleansApplicationProtocol.Orleans1
             }
         };

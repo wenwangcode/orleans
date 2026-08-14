@@ -196,6 +196,7 @@ namespace Orleans.Connections.Security
             feature.ApplicationProtocol = sslStream.NegotiatedApplicationProtocol.Protocol;
 
             context.Features.Set<ITlsApplicationProtocolFeature>(feature);
+            context.Features.Set<Orleans.Runtime.Messaging.INegotiatedAlpnFeature>(feature);
             feature.LocalCertificate = ConvertToX509Certificate2(sslStream.LocalCertificate);
             feature.RemoteCertificate = ConvertToX509Certificate2(sslStream.RemoteCertificate);
             feature.NegotiatedCipherSuite = sslStream.NegotiatedCipherSuite;

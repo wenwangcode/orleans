@@ -14,12 +14,16 @@ namespace Orleans.Hosting
         /// Enables silo-to-silo connection authentication using the specified <see cref="ISiloConnectionAuthenticator"/> implementation.
         /// <para>
         /// This registers authentication middleware on both inbound and outbound silo connections.
-        /// The protocol uses challenge-response: server sends a challenge, client responds with a token,
-        /// server validates.
+        /// Whether a token is exchanged on a given connection is decided by the negotiated TLS ALPN
+        /// protocol (<see cref="SiloAuthOptions.AuthApplicationProtocol"/>), which Orleans' TLS layer
+        /// advertises automatically — both silos must be TLS-enabled, but no additional TLS
+        /// configuration is required. If either peer does not have authentication configured, the
+        /// auth protocol is not negotiated and the connection proceeds without a token, which makes
+        /// rolling deployments (enabling auth cluster-wide without a coordinated restart) safe.
         /// </para>
         /// <para>
-        /// <b>Important:</b> For security, register TLS middleware before authentication so that
-        /// auth traffic is encrypted on the wire.
+        /// <b>Important:</b> Silo connection authentication requires TLS (<c>UseTls</c>) to be
+        /// configured; ALPN negotiation only occurs within a TLS handshake.
         /// </para>
         /// </summary>
         /// <typeparam name="TAuthenticator">
